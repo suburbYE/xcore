@@ -1,0 +1,32 @@
+{
+  "name": "360加固保",
+  "version": "2026",
+  "application_classes": [
+    "com.stub.StubApp",
+    "com.qihoo.util.StubApp",
+    "com.qihoo360.jiagu.StubApplication",
+    "com.qihoo.magic.a"
+  ],
+  "native_libs": [
+    "libjiagu.so",
+    "libjiagu_a64.so",
+    "libjiagu_x86.so",
+    "libjiagu_x64.so",
+    "libjiagu_v7a.so",
+    "libjiagu_v8a.so"
+  ],
+  "asset_patterns": [
+    "jiagu",
+    "libjiagu",
+    "ijm_lib",
+    "toooooool",
+    "0OO00l1ll1l"
+  ],
+  "dex_patterns": [
+    "com.stub.StubApp",
+    "com.qihoo.util"
+  ],
+  "package_patterns": [],
+  "recommendation": "heavy_shell",
+  "confidence_weight": 1.0
+}

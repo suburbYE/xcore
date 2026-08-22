@@ -1,0 +1,8 @@
+{
+  "name": "tea_delta",
+  "algorithm": "TEA/XTEA family",
+  "patterns": ["b9 79 37 9e"],
+  "decision": "AND",
+  "min_hits": 1,
+  "note": "Must co-occur with 16/32-round loop CFG pattern"
+}

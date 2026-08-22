@@ -1,0 +1,11 @@
+{
+  "name": "chacha20",
+  "algorithm": "ChaCha20 stream cipher",
+  "source": "generic",
+  "patterns": [
+    "657870616e642033322d62797465206b"
+  ],
+  "decision": "AND",
+  "min_hits": 1,
+  "note": "Initial state constant 'expand 32-byte k'; may be absent if compiler decomposes into MOV immediate pairs"
+}

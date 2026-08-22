@@ -1,0 +1,30 @@
+{
+  "name": "阿里聚安全",
+  "version": "2026",
+  "application_classes": [
+    "com.alibaba.wireless.security.jaq.JaqApplication",
+    "com.alibaba.wireless.security.mainplugin.SecurityApplication",
+    "com.alibaba.wireless.security.open.SecSgApplication"
+  ],
+  "native_libs": [
+    "libsgmain.so",
+    "libsgsecuritybody.so",
+    "libsgavmp.so",
+    "libsgmiddletier.so",
+    "libsgsecuritycore.so"
+  ],
+  "asset_patterns": [
+    "alibaba",
+    "sgsecurity",
+    "jaq",
+    "sg_main",
+    "libsgmain"
+  ],
+  "dex_patterns": [
+    "com.alibaba.wireless.security",
+    "com.alibaba.jaq"
+  ],
+  "package_patterns": [],
+  "recommendation": "heavy_shell",
+  "confidence_weight": 1.0
+}

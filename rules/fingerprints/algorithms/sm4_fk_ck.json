@@ -1,0 +1,10 @@
+{
+  "name": "sm4_fk_ck",
+  "algorithm": "SM4 block cipher (GB/T 32907)",
+  "patterns": [
+    "c6 ba b1 a3 50 33 aa 56 97 91 7d 67 dc 22 70 b2",
+    "15 0e 07 00 31 2a 23 1c 4d 46 3f 38 69 62 5b 54"
+  ],
+  "decision": "OR",
+  "min_hits": 1
+}

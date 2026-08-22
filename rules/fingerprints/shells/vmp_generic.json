@@ -1,0 +1,26 @@
+{
+  "name": "VMP Generic Detection",
+  "version": "2026",
+  "application_classes": [],
+  "native_libs": [
+    "libdvm.so",
+    "libart.so",
+    "libvmpshield.so",
+    "libavmp.so",
+    "libvmp.so",
+    "libijm.so",
+    "libnqshield.so",
+    "libprotect.so",
+    "libDexHelper.so"
+  ],
+  "asset_patterns": [
+    "vmp",
+    "vm_data",
+    "vmpdata"
+  ],
+  "dex_patterns": [],
+  "package_patterns": [],
+  "recommendation": "heavy_shell",
+  "confidence_weight": 0.6,
+  "note": "VMP detection is heuristic-based. This fingerprint activates when libdvm.so and libart.so coexist (non-standard runtime replacement) or when VMP-specific .so files are found. Individual confidence may be medium."
+}

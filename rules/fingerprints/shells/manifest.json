@@ -1,0 +1,14 @@
+{
+  "manifest_version": "1.0",
+  "description": "X-Core Phase 4a Shell Fingerprint Database",
+  "shell_count": 6,
+  "last_updated": "2026-07-30",
+  "shells": [
+    "360_jiagu",
+    "bangbang",
+    "aijiami",
+    "tencent_legu",
+    "alibaba_juxin",
+    "vmp_generic"
+  ]
+}

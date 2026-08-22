@@ -1,0 +1,9 @@
+{
+  "name": "xcore-deobfuscator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "XCore Deobfuscator — AST instrumentation, sandbox execution, and state-machine flattening",
+  "dependencies": {
+    "acorn": "^8.14.0"
+  }
+}

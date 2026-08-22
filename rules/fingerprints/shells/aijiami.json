@@ -1,0 +1,33 @@
+{
+  "name": "爱加密",
+  "version": "2026",
+  "application_classes": [
+    "com.shell.SuperApplication",
+    "com.ijm.core.EntryApplication",
+    "com.ijm.core.IjmApplication",
+    "s.h.e.l.l.F",
+    "com.protect.shell.SuperApplication"
+  ],
+  "native_libs": [
+    "libexec.so",
+    "libexecmain.so",
+    "libexecarm.so",
+    "libijm.so",
+    "libijmdata.so"
+  ],
+  "asset_patterns": [
+    "ijiami",
+    "ijm",
+    "ijm_lib",
+    "libexec",
+    "protect"
+  ],
+  "dex_patterns": [
+    "com.shell.SuperApplication",
+    "com.ijm.core",
+    "s.h.e.l.l"
+  ],
+  "package_patterns": [],
+  "recommendation": "heavy_shell",
+  "confidence_weight": 1.0
+}

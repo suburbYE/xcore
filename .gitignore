@@ -1,0 +1,34 @@
+# 构建产物
+*.exe
+*.obj
+*.pdb
+*.ilk
+build/
+out/
+
+# 判例库与数据
+tools/*.db
+tools/*.db-wal
+tools/*.db-shm
+knowledge/
+cache/
+reports/
+sandbox/
+
+# 凭证与会话
+cloud.json
+.xchat_session.json
+xchat/*.key
+*.pem
+.env
+
+# 依赖与中间产物
+node_modules/
+__pycache__/
+*.pyc
+
+# 测试样本
+tests/*.wasm
+tests/*.bin
+tests/*.dump
+test_samples/

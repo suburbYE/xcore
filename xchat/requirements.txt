@@ -1,0 +1,15 @@
+# X-Chat Phase 5 Dependencies
+# Model Context Protocol SDK
+mcp>=1.0.0
+
+# Vision: image processing & analysis
+pillow>=10.0.0
+opencv-python>=4.8.0
+pytesseract>=0.3.10
+
+# CLI: terminal rich rendering
+rich>=13.0.0
+
+# HTTP client (supplementary to urllib, for async pipelines)
+httpx>=0.27.0
+（内容由AI生成，仅供参考）

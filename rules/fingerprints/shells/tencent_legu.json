@@ -1,0 +1,33 @@
+{
+  "name": "腾讯乐固",
+  "version": "2026",
+  "application_classes": [
+    "com.tencent.StubShell.TxAppEntry",
+    "com.tencent.legu.StubApplication",
+    "com.tencent.mm.app.Application",
+    "com.tencent.StubShell.TxShell"
+  ],
+  "native_libs": [
+    "libtup.so",
+    "libshell.so",
+    "libBugly.so",
+    "libshella-",
+    "libshellx-",
+    "liblegu.so",
+    "libtguard.so"
+  ],
+  "asset_patterns": [
+    "tencent",
+    "legu",
+    "shell_",
+    "tx_shell",
+    "0OO00l1ll1l"
+  ],
+  "dex_patterns": [
+    "com.tencent.StubShell",
+    "com.tencent.legu"
+  ],
+  "package_patterns": [],
+  "recommendation": "heavy_shell",
+  "confidence_weight": 1.0
+}

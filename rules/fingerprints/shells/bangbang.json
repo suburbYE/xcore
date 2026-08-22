@@ -1,0 +1,29 @@
+{
+  "name": "梆梆加固",
+  "version": "2026",
+  "application_classes": [
+    "com.secneo.apkwrapper.AW",
+    "com.secneo.apkwrapper.AP",
+    "com.secneo.guard.ApplicationWrapper"
+  ],
+  "native_libs": [
+    "libsecmain.so",
+    "libDexHelper.so",
+    "libDexHelper-x86.so",
+    "libDexHelper-arm.so",
+    "libbangbang.so"
+  ],
+  "asset_patterns": [
+    "secneo",
+    "bangbang",
+    "classes0.jar",
+    "libsecexe"
+  ],
+  "dex_patterns": [
+    "com.secneo.apkwrapper",
+    "com.secneo.guard"
+  ],
+  "package_patterns": [],
+  "recommendation": "heavy_shell",
+  "confidence_weight": 1.0
+}

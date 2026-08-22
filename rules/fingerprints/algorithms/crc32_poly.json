@@ -1,0 +1,7 @@
+{
+  "name": "crc32_poly",
+  "algorithm": "CRC32 (Ethernet/ZIP polynomial)",
+  "patterns": ["20 83 b8 ed"],
+  "decision": "AND",
+  "min_hits": 1
+}
