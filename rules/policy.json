@@ -1,0 +1,22 @@
+{
+  "_comment": "放宽或收紧 sh.run 的命令策略。改这里不用改代码。allow/prompt/deny 三张表按命令名（可执行文件名，不含路径）匹配；deny 永远优先，prompt 需要人工批准（当前无批准通道 = 拒绝）。writable_roots 用来给工作台之外再加可写目录。",
+  "_examples": {
+    "allow": [
+      "pip",
+      "ollama"
+    ],
+    "prompt": [
+      "sc"
+    ],
+    "deny": [
+      "mklink"
+    ],
+    "writable_roots": [
+      "E:/hexin/work"
+    ]
+  },
+  "allow": [],
+  "prompt": [],
+  "deny": [],
+  "writable_roots": []
+}

@@ -10,6 +10,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { PEParser, detectFormat } = require("./pe_parser.js");
 
 // ─── ELF 常量 ───────────────────────────────────────────────────────────────
 const EI_CLASS       = 4;   // 1=32-bit, 2=64-bit
@@ -28,11 +29,12 @@ const SHT_DYNSYM     = 11;
 // ─── 命令行解析 ─────────────────────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { so: null, strings: null, json: false };
+  const opts = { so: null, strings: null, json: false, maxScanSize: 0 };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--so" && i + 1 < args.length) opts.so = args[++i];
     else if (args[i] === "--strings" && i + 1 < args.length) opts.strings = JSON.parse(args[++i]);
     else if (args[i] === "--json") opts.json = true;
+    else if (args[i] === "--max-scan-size" && i + 1 < args.length) opts.maxScanSize = parseInt(args[++i], 10) || 0;
   }
   if (!opts.so || !opts.strings || !Array.isArray(opts.strings)) {
     console.error("Usage: node string_xref.js --so <path> --strings <json_array> [--json]");
@@ -130,12 +132,13 @@ class InstructionMatcher {
 
   /**
    * 搜索对指定地址的引用
-   * @param {number} targetAddr - .rodata/.data 中字符串的虚拟地址
+   * @param {number} targetAddr - .rodata/.data 中字符串的虚拟地址（RVA/VA）
    * @param {number} textOffset - .text 段文件偏移
    * @param {number} textSize   - .text 段大小
+   * @param {number} textVAddr  - .text 段虚拟地址（RVA/VA），用于 RIP 相对寻址换算
    * @returns {Array<{at: number, type: string}>}
    */
-  findXRefs(targetAddr, textOffset, textSize) {
+  findXRefs(targetAddr, textOffset, textSize, textVAddr) {
     const refs = [];
     const chunkSize = 4; // 对齐到 4 字节
     const end = textOffset + textSize - 4;
@@ -161,7 +164,7 @@ class InstructionMatcher {
               const nrd = next & 0x1F;
               if (rn === rd && nrd === rd) {
                 const imm12 = (next >> 10) & 0xFFF;
-                const addr = ((off - textOffset) & ~0xFFF) + page + imm12;
+                const addr = (((off - textOffset + textVAddr) & ~0xFFF) + page + imm12) >>> 0;
                 if (addr === targetAddr || (addr & 0xFFFFFFFF) === (targetAddr & 0xFFFFFFFF)) {
                   refs.push({ at: off - textOffset, type: "adrp_add" });
                 }
@@ -174,7 +177,7 @@ class InstructionMatcher {
               const rt = next & 0x1F;
               if (rn === rd) {
                 const imm12 = ((next >> 10) & 0xFFF) << 2; // scaled by 4
-                const addr = ((off - textOffset) & ~0xFFF) + page + imm12;
+                const addr = (((off - textOffset + textVAddr) & ~0xFFF) + page + imm12) >>> 0;
                 if (addr === targetAddr || (addr & 0xFFFFFFFF) === (targetAddr & 0xFFFFFFFF)) {
                   refs.push({ at: off - textOffset, type: "adrp_ldr" });
                 }
@@ -193,7 +196,7 @@ class InstructionMatcher {
           // LDR literal
           const u = (insn >> 23) & 1;
           const imm12 = insn & 0xFFF;
-          const pc = (off - textOffset + 8);
+          const pc = (off - textOffset + textVAddr + 8);
           const addr = u ? pc + imm12 : pc - imm12;
           if ((addr & 0xFFFFFFFF) === (targetAddr & 0xFFFFFFFF)) {
             refs.push({ at: off - textOffset, type: "ldr_literal" });
@@ -231,7 +234,7 @@ class InstructionMatcher {
           // RIP-relative: mod=00, rm=101
           if (mod === 0 && rm === 5 && off + 7 < end) {
             const disp32 = this.buf.readInt32LE(off + 3);
-            const rip = off - textOffset + 7;
+            const rip = textVAddr + (off - textOffset) + 7;
             const addr = (rip + disp32) >>> 0;
             if (addr === targetAddr) {
               refs.push({ at: off - textOffset, type: "lea_rip" });
@@ -245,7 +248,7 @@ class InstructionMatcher {
           const rm  = modrm & 0x7;
           if (mod === 0 && rm === 5 && off + 7 < end) {
             const disp32 = this.buf.readInt32LE(off + 3);
-            const rip = off - textOffset + 7;
+            const rip = textVAddr + (off - textOffset) + 7;
             const addr = (rip + disp32) >>> 0;
             if (addr === targetAddr) {
               refs.push({ at: off - textOffset, type: "mov_rip" });
@@ -261,6 +264,8 @@ class InstructionMatcher {
 // ─── 符号表解析（辅助函数命名） ─────────────────────────────────────────────
 function parseSymbols(sections, parser) {
   const symMap = new Map(); // addr → name
+  // PE 无 ELF dynsym 表，导入表符号不携带导出地址，直接返回空表（函数名回落 sub_XXXX）
+  if (parser instanceof PEParser) return symMap;
   for (const sec of sections) {
     if (sec.sh_type !== SHT_SYMTAB && sec.sh_type !== SHT_DYNSYM) continue;
 
@@ -320,20 +325,23 @@ function inferRefTypes(xrefs, textBuf, textOffset) {
 function main() {
   const opts = parseArgs();
   const buf = fs.readFileSync(opts.so);
-  const parser = new ELFParser(buf);
+
+  // 按文件格式选择解析器：ELF → ELFParser，PE → PEParser
+  const fmt = detectFormat(buf);
+  const parser = fmt === "pe" ? new PEParser(buf) : new ELFParser(buf);
   const arch = parser.getArch();
 
   if (!opts.json) {
     console.error(`[string_xref] Target: ${opts.so}`);
-    console.error(`[string_xref] Arch: ${arch}`);
+    console.error(`[string_xref] Arch: ${arch} (format: ${fmt})`);
     console.error(`[string_xref] Searching ${opts.strings.length} strings`);
   }
 
   const sections = parser.getSections();
 
-  // 找到关键段
+  // 找到关键段（PE 只读数据段为 .rdata，ELF 为 .rodata）
   const textSec  = sections.find(s => s.name === ".text");
-  const rodataSec = sections.find(s => s.name === ".rodata");
+  const rodataSec = sections.find(s => s.name === ".rodata") || sections.find(s => s.name === ".rdata");
   const dataSec  = sections.find(s => s.name === ".data");
   const dataSections = [rodataSec, dataSec].filter(Boolean);
 
@@ -345,9 +353,8 @@ function main() {
   // 解析符号表供后续函数命名
   const symMap = parseSymbols(sections, parser);
 
-  // 大文件分块：>50MB 时只搜索前 50MB 的关键段
-  const MAX_SEARCH_SIZE = 50 * 1024 * 1024;
-  const textSearchSize = Math.min(textSec.sh_size, MAX_SEARCH_SIZE);
+  // --max-scan-size 0 = 全量扫描（不截断）
+  const textSearchSize = (opts.maxScanSize > 0) ? Math.min(textSec.sh_size, opts.maxScanSize) : textSec.sh_size;
   const textBuf = buf.slice(textSec.sh_offset, textSec.sh_offset + textSearchSize);
 
   const matcher = new InstructionMatcher(arch, buf);
@@ -360,7 +367,7 @@ function main() {
     // 在所有数据段中搜索字符串
     for (const ds of dataSections) {
       if (!ds || ds.sh_size === 0) continue;
-      const searchSize = Math.min(ds.sh_size, MAX_SEARCH_SIZE);
+      const searchSize = (opts.maxScanSize > 0) ? Math.min(ds.sh_size, opts.maxScanSize) : ds.sh_size;
       const dsBuf = buf.slice(ds.sh_offset, ds.sh_offset + searchSize);
 
       let searchPos = 0;
@@ -372,7 +379,7 @@ function main() {
         const fileOffset = ds.sh_offset + idx;
 
         // 对该地址做交叉引用追踪
-        const rawXRefs = matcher.findXRefs(strVAddr, textSec.sh_offset, textSearchSize);
+        const rawXRefs = matcher.findXRefs(strVAddr, textSec.sh_offset, textSearchSize, textSec.sh_addr);
         const typedXRefs = inferRefTypes(rawXRefs, textBuf, textSec.sh_offset);
 
         // 推断所在函数

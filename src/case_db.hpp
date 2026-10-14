@@ -18,7 +18,11 @@ struct CaseInfo {
     std::string scan_date;
     nlohmann::json rules_hits;       // compact scan result
     nlohmann::json llm_algorithms;   // parsed ["rsa-2048","aes-128-cbc",...]
-    std::string llm_confidence;
+    // Evidence confidence — ENGINE-COMPUTED, never model-reported.
+    // The model is forbidden from emitting "confidence" (see prompts::classifier).
+    // See CaseDB::compute_confidence() for the derivation rules.
+    std::string evidence_confidence; // "0.00" ~ "1.00"
+    std::string confidence_source;   // manual | rules | llm-only | none
     std::string llm_raw_response;    // original LLM JSON
     std::string notes;
     std::string created_at;
@@ -68,6 +72,16 @@ public:
     // ── Utility ───────────────────────────────────────
     static std::string sha256_file(const std::string& file_path);
     static std::string sha256_data(const void* data, size_t len);
+
+    // ── Evidence confidence (engine-side, model has no say) ───
+    // Rules:
+    //   manual  -> 1.00   (a human confirmed it; see notes/_history)
+    //   rules   -> 0.40 + 0.15 * (distinct rule categories), capped at 0.95
+    //   llm-only (LLM named an algorithm but NO rule evidence) -> 0.00, untrusted
+    //   none    -> 0.00
+    // Rationale: an LLM naming an algorithm without rule evidence is exactly the
+    // failure mode that produced 94 hallucinated knowledge entries (2026-09).
+    static void compute_confidence(CaseInfo& ci);
 
 private:
     void* db_ = nullptr;            // sqlite3*

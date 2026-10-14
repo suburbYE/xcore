@@ -19,15 +19,16 @@ async def main():
     parser.add_argument("--no-cloud", action="store_true", help="Disable cloud LLM fallback")
     parser.add_argument("--report", action="store_true", help="Dump session report")
     parser.add_argument("--native", action="store_true", help="Force Native Scanner for --scan (otherwise auto-detect by extension)")
+    parser.add_argument("--non-interactive", action="store_true", help="Skip all input() prompts; with --scan/--fetch, scan then exit (for batch scripts)")
     args = parser.parse_args()
 
     session = XChatSession(cloud_ok=not args.no_cloud)
 
     if args.scan:
-        await session.interactive(file_path=args.scan, native=args.native)
+        await session.interactive(file_path=args.scan, native=args.native, non_interactive=args.non_interactive)
     elif args.fetch:
         await session.fetch(args.fetch)
-        await session.interactive()
+        await session.interactive(non_interactive=args.non_interactive)
     elif args.analyze:
         await session.analyze(args.analyze)
     elif args.ask:

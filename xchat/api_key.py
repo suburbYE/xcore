@@ -43,21 +43,55 @@ class APIKeyManager:
 
     @classmethod
     def load(cls) -> dict | None:
+        """Return {"providers": {name: key}, "primary": name}.
+
+        Legacy single-provider format is transparently upgraded on read.
+        """
         try:
             if not CLOUD_CONFIG.exists():
                 return None
             encrypted = CLOUD_CONFIG.read_bytes()
             key = cls._derive_key()
             plain = cls._decrypt(encrypted, key)
-            return json.loads(plain)
+            data = json.loads(plain)
+            if "providers" in data:
+                return data
+            if "provider" in data and "key" in data:  # legacy format
+                return {"providers": {data["provider"]: data["key"]}, "primary": data["provider"]}
+            return None
         except Exception:
             return None
 
     @classmethod
-    def save(cls, provider: str, api_key: str):
+    def _write(cls, data: dict):
         key = cls._derive_key()
-        data = json.dumps({"provider": provider, "key": api_key})
-        encrypted = cls._encrypt(data, key)
+        plain = json.dumps(data)
+        encrypted = cls._encrypt(plain, key)
         CLOUD_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         CLOUD_CONFIG.write_bytes(encrypted)
         CLOUD_CONFIG.chmod(0o600)
+
+    @classmethod
+    def save(cls, provider: str, api_key: str):
+        """Legacy single-provider write: replaces config with one provider."""
+        cls._write({"providers": {provider: api_key}, "primary": provider})
+
+    @classmethod
+    def add_provider(cls, provider: str, api_key: str, primary: bool = False):
+        """Add or overwrite one provider, keeping the others."""
+        cur = cls.load() or {"providers": {}, "primary": None}
+        providers = dict(cur.get("providers", {}))
+        providers[provider] = api_key
+        cur_primary = cur.get("primary")
+        if primary or not cur_primary or cur_primary not in providers:
+            cur_primary = provider
+        cls._write({"providers": providers, "primary": cur_primary})
+
+    @classmethod
+    def set_primary(cls, provider: str):
+        """Switch the primary provider used by default."""
+        cur = cls.load()
+        if not cur or provider not in cur.get("providers", {}):
+            raise ValueError(f"provider '{provider}' not configured")
+        cur["primary"] = provider
+        cls._write(cur)

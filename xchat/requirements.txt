@@ -1,15 +1,31 @@
-# X-Chat Phase 5 Dependencies
-# Model Context Protocol SDK
+# X-Chat / X-Core Python 依赖
+#
+# 安装：pip install -r xchat\requirements.txt
+# 安装后需将 PYTHONPATH 指向 xcore 根目录（见 README「环境依赖」）。
+
+# ── 反汇编 / 模拟执行（Native 靶心扫描、micro_executor、smoke_test）──
+# capstone      -> modules/native/bb_extractor.py, micro_executor.py, pipeline_runner.py
+capstone>=5.0.0
+# unicorn       -> modules/native/micro_executor.py (ARM64 微执行)
+unicorn>=2.0.0
+# lief          -> scripts/pipeline_runner.py (ELF 段映射)
+lief>=0.14.0
+
+# ── 凭证加密（api_key.py AESGCM 本地加密存储）──
+cryptography>=42.0.0
+
+# ── 云端 / 异步 HTTP ──
+httpx>=0.27.0
+
+# ── 浏览器旁路拦截（aggregator.py，可选：仅 --fetch URL 需要）──
+# 安装后还需执行：playwright install chromium
+playwright>=1.40.0
+
+# ── MCP Server（Phase 5b，xchat/tools/mcp_server.py）──
 mcp>=1.0.0
 
-# Vision: image processing & analysis
-pillow>=10.0.0
-opencv-python>=4.8.0
-pytesseract>=0.3.10
-
-# CLI: terminal rich rendering
+# ── 终端富文本渲染（xchat/cli/renderer.py）──
 rich>=13.0.0
 
-# HTTP client (supplementary to urllib, for async pipelines)
-httpx>=0.27.0
-（内容由AI生成，仅供参考）
+# ── 图像处理（xchat/vision/ 图像预处理）──
+pillow>=10.0.0

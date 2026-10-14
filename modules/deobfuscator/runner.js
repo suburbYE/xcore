@@ -10,11 +10,12 @@ const vm = require('vm');
 
 // ─── CLI ──────────────────────────────────────────────────
 function parseArgs(args) {
-  const cfg = { input: null, traceOut: null, inst: false, freeze: false, json: false };
+  const cfg = { input: null, traceOut: null, entry: null, inst: false, freeze: false, json: false };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--input':     cfg.input    = args[++i]; break;
       case '--trace-out': cfg.traceOut = args[++i]; break;
+      case '--entry':     cfg.entry    = args[++i]; break;
       case '--inst':      cfg.inst     = true; break;
       case '--freeze':    cfg.freeze   = true; break;
       case '--json':      cfg.json     = true; break;
@@ -26,19 +27,72 @@ function parseArgs(args) {
 }
 
 // ─── Proxy Builder ────────────────────────────────────────
+// 兜底 mock 打标记：window/document 是 catch-all Proxy，任意属性取值都会返回
+// 一个 mock 函数。若不区分，入口存在性判断会恒为真（历史上就是这样误报的）。
+const MOCK = Symbol.for('xcore.sandbox.mock');
+
 function mkProxy(name, defaults = {}) {
   return new Proxy(Object.assign({}, defaults), {
     get(t, p) {
       if (p in t) return t[p];
       if (typeof p === 'string' && p !== 'then' && p !== Symbol.toPrimitive) {
         if (p.endsWith('_')) return undefined;
-        const mock = () => {}; t[p] = mock; return mock;
+        const mock = () => {}; mock[MOCK] = true; t[p] = mock; return mock;
       }
       return undefined;
     },
     set(t, p, v) { t[p] = v; return true; },
     has() { return true; },
   });
+}
+
+// ─── 入口解析 ─────────────────────────────────────────────
+// 支持 "window.ParamsSign.sign" / "target" / "globalThis.foo.bar" 等写法。
+// 返回 { fn, receiver }；入口不存在返回 null（不是错误，由调用方决定语义）。
+function resolveEntry(root, expr) {
+  const parts = String(expr || '').split('.').map(s => s.trim()).filter(Boolean);
+  if (parts.length && (parts[0] === 'sandbox' || parts[0] === 'globalThis')) parts.shift();
+  if (!parts.length) return null;
+
+  const chain = [root];
+  let i = 0;
+  for (; i < parts.length; i++) {
+    const cur = chain[chain.length - 1];
+    if (cur == null) break;
+    let next;
+    try { next = cur[parts[i]]; } catch (e) { break; }
+    if (next == null) break;
+    if (next[MOCK] === true) break;                       // 撞到兜底 mock → 脚本未定义该入口
+    if (typeof next !== 'function' && typeof next !== 'object') { chain.push(next); i++; break; }
+    chain.push(next);
+  }
+  const remaining = parts.slice(i);
+  const last  = chain[chain.length - 1];
+  const owner = chain.length >= 2 ? chain[chain.length - 2] : root;
+  if (last == null || last[MOCK] === true) return null;
+
+  // 完整路径即为可调用入口：receiver 取上一层（方法调用语义）
+  if (remaining.length === 0) {
+    return typeof last === 'function' ? { fn: last, receiver: owner } : null;
+  }
+
+  // 形如 A.B：B 多半是 A 的实例方法（京东 ParamsSign.sign 即此类），先 new 再取
+  if (remaining.length === 1 && typeof last === 'function') {
+    const names = [remaining[0], remaining[0] + 'Sync'];   // 兼容 JD 的 sign / signSync 双入口
+    try {
+      const inst = new last();
+      if (inst != null) {
+        for (const n of names) {
+          if (typeof inst[n] === 'function') return { fn: inst[n], receiver: inst };
+        }
+      }
+    } catch (e) { /* 不是构造函数 → 退回去试静态方法 */ }
+    for (const n of names) {
+      const stat = last[n];
+      if (typeof stat === 'function' && stat[MOCK] !== true) return { fn: stat, receiver: last };
+    }
+  }
+  return null;
 }
 
 // ─── Main ─────────────────────────────────────────────────
@@ -82,15 +136,17 @@ function main() {
   try { vm.runInContext(code, ctx, { filename: path.basename(cfg.input) }); }
   catch(e) { execError = { message: e.message, stack: (e.stack||'').split('\n').slice(0,5).join(' | ') }; }
 
-  // Sign
-  let h5st = null, entryError = null;
-  if (!execError && sandbox.window.ParamsSign) {
-    try {
-      const inst = new sandbox.window.ParamsSign();
-      const r = inst.signSync ? inst.signSync({ test: 1 }) : inst.sign({ test: 1 });
+  // Sign / entry invocation
+  let h5st = null, entryError = null, entryFound = false;
+  const entryExpr = cfg.entry || 'window.ParamsSign.sign';
+  try {
+    const resolved = resolveEntry(sandbox, entryExpr);
+    if (resolved) {
+      entryFound = true;
+      const r = resolved.fn.call(resolved.receiver, { test: 1 });
       if (r && typeof r === 'object') h5st = r.h5st || null;
-    } catch(e) { entryError = { message: e.message, stack: (e.stack||'').split('\n').slice(0,5).join(' | ') }; }
-  }
+    }
+  } catch(e) { entryError = { message: e.message, stack: (e.stack||'').split('\n').slice(0,5).join(' | ') }; }
 
   // Trace
   let traceSummary = null;
@@ -107,6 +163,7 @@ function main() {
 
   const report = {
     status: execError ? 'script_error' : (entryError ? 'entry_error' : 'ok'),
+    entry_expr: entryExpr, entry_found: entryFound,
     input_file: cfg.input, file_size: code.length,
     freeze: cfg.freeze, inst: cfg.inst,
     exec_error: execError, entry_error: entryError, h5st,
@@ -116,6 +173,7 @@ function main() {
   if (cfg.json) console.log(JSON.stringify(report));
   else {
     console.log(`[runner] ${cfg.input}  Status: ${report.status}  Size: ${code.length}B`);
+    if (!entryFound && !entryError) console.log(`  entry not found: ${entryExpr} (no traces will be produced)`);
     if (h5st) console.log(`  h5st: ${h5st.substring(0,80)}...`);
     if (traceSummary) console.log(`  Trace: ${traceSummary.total_traces} steps, ${traceSummary.unique_cases} unique`);
   }

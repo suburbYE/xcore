@@ -6,14 +6,20 @@
 build/
 out/
 
-# 判例库与数据
+# 数据资产（公开仓库一律不含）
 tools/*.db
 tools/*.db-wal
 tools/*.db-shm
+tools/*.db.*
+tools/*.sqlite
 knowledge/
+knowledge_quarantine_*/
 cache/
 reports/
 sandbox/
+state/
+sessions/
+test_samples/
 
 # 凭证与会话
 cloud.json
@@ -31,4 +37,3 @@ __pycache__/
 tests/*.wasm
 tests/*.bin
 tests/*.dump
-test_samples/

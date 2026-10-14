@@ -17,6 +17,7 @@
 #include <unordered_set>
 #include "nlohmann.json.hpp"
 #include "xcore_api.hpp"
+#include "version.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -716,7 +717,8 @@ int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
     if (argc < 3) {
-        std::cout << "X-Core v0.5  Usage: xcore <file_or_dir> <rules.json> [--brief] [--stdin]\n";
+        std::cout << "X-Core v" << XCORE_VERSION
+                  << "  Usage: xcore <file_or_dir> <rules.json> [--brief] [--stdin]\n";
         return 1;
     }
     std::string tgt = argv[1], rp = argv[2];
@@ -730,7 +732,7 @@ int main(int argc, char* argv[]) {
     auto rules = load_rules(rp);
 
     json out;
-    out["tool"] = "xcore"; out["version"] = "0.5"; out["rules"] = rp; out["results"] = json::array();
+    out["tool"] = "xcore"; out["version"] = XCORE_VERSION; out["rules"] = rp; out["results"] = json::array();
 
     if (use_stdin) {
         auto j = scan_stream(std::cin, "pipe://stdin");
@@ -744,7 +746,7 @@ int main(int argc, char* argv[]) {
     }
 
     out["files_scanned"] = out["results"].size();
-    std::cout << (brief ? out.dump() : out.dump(2)) << "\n";
+    std::cout << (brief ? out.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) : out.dump(2, ' ', false, nlohmann::json::error_handler_t::replace)) << "\n";
     return 0;
 }
 #endif

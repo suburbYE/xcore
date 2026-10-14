@@ -1,4 +1,13 @@
 {
+  "name": "xcore",
+  "version": "0.31.0",
+  "private": true,
+  "description": "xcore 逆向工具链 - web 分析模块",
+  "scripts": {
+    "jsvm": "node modules/web/jsvm_analyzer.js",
+    "wasm": "node modules/web/wasm_analyzer.js",
+    "web": "node modules/web/pipeline_web.js"
+  },
   "dependencies": {
     "adm-zip": "^0.6.0"
   }

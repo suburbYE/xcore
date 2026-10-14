@@ -20,11 +20,12 @@ from typing import Any
 
 from .frida_runner import run_frida_session
 from .error_parser import parse_frida_error, extract_hook_context
+from ..config import DIALOG_MODEL
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-# Default LLM model for fix generation
-_DEFAULT_LLM_MODEL = "qwen2.5:7b"
+# Default LLM model for fix generation — follows the single local dialog model
+_DEFAULT_LLM_MODEL = DIALOG_MODEL
 
 # Timeout for individual LLM calls
 _LLM_TIMEOUT = 120

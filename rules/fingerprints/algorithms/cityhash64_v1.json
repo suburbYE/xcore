@@ -1,0 +1,33 @@
+{
+  "name": "cityhash64_v1",
+  "algorithm": "CityHash64",
+  "source": "sample_a_2026_07",
+  "note": "Renamed from wyhash_v1 on 2026-09-25. All five constants are CityHash64 (Google/Abseil) standard constants and the mixing function is HashLen16. The original rule mislabelled this family as a WyHash variant, and no WyHash constant was ever verified present in any scanned binary.",
+  "patterns": [
+    "69 2d 38 eb 08 ea df 9d",
+    "4f 40 90 2f 3b 6a e1 9a",
+    "27 31 cb 97 5c c8 a5 c3",
+    "73 f2 98 be 6f b6 92 b4",
+    "57 65 9e 50 c7 d7 49 c9"
+  ],
+  "pattern_roles": {
+    "69 2d 38 eb 08 ea df 9d": "kMul 0x9ddfea08eb382d69 (HashLen16 multiplier)",
+    "4f 40 90 2f 3b 6a e1 9a": "k2 0x9ae16a3b2f90404f",
+    "27 31 cb 97 5c c8 a5 c3": "k0 0xc3a5c85c97cb3127",
+    "73 f2 98 be 6f b6 92 b4": "k1 0xb492b66fbe98f273",
+    "57 65 9e 50 c7 d7 49 c9": "k3 0xc949d7c7509e6557"
+  },
+  "negative_patterns": {
+    "_comment": "A hit on any of these is more consistent with WyHash; do not classify as CityHash64 in that case",
+    "patterns": [
+      "2f 64 bd 78 64 1d 76 a0",
+      "db 28 b4 a0 d1 7e 03 e7",
+      "e3 c6 88 9c f0 6a bc 8e",
+      "c3 4c 37 75 cc 65 99 58"
+    ],
+    "roles": ["_wyp[0] 0xa0761d6478bd642f","_wyp[1] 0xe7037ed1a0b428db","_wyp[2] 0x8ebc6af09c88c6e3","_wyp[3] 0x589965cc75374cc3"]
+  },
+  "decision": "OR",
+  "min_hits": 3,
+  "min_hits_note": "Any of the 5 constants counts; >=4 recommended to avoid coincidental constant collisions"
+}

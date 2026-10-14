@@ -1,0 +1,12 @@
+{
+  "name": "xcore-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "XCore Web Analyzer - HTML/JS/WASM 静态分析与 API 探测",
+  "scripts": {
+    "fetch": "node web_fetcher.js",
+    "probe": "node api_probe.js",
+    "wasm": "node wasm_analyzer.js",
+    "pipeline": "node pipeline_web.js"
+  }
+}

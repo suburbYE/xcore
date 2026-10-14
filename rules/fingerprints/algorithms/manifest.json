@@ -1,28 +1,29 @@
 {
-  "version": "1.1",
+  "version": "1.2",
   "fingerprints": {
-    "wyhash_v1": {
-      "file": "wyhash_v1.json",
-      "source": "mobile_app_v2026_07"
+    "_correction_20260925": "wyhash_v1 renamed to cityhash64_v1: all five constants are CityHash64 standard constants; the original algorithm-family label was wrong.",
+    "chacha20": {
+      "file": "chacha20.json",
+      "source": "generic"
     },
-    "quic_sbox_v1": {
-      "file": "quic_sbox_v1.json",
-      "source": "mobile_app_v2026_03"
-    },
-    "tea_delta": {
-      "file": "tea_delta.json",
+    "cityhash64_v1": {
+      "file": "cityhash64_v1.json",
       "source": "generic"
     },
     "crc32_poly": {
       "file": "crc32_poly.json",
       "source": "generic"
     },
+    "quic_sbox_v1": {
+      "file": "quic_sbox_v1.json",
+      "source": "generic"
+    },
     "sm4_fk_ck": {
       "file": "sm4_fk_ck.json",
       "source": "GB/T_32907"
     },
-    "chacha20": {
-      "file": "chacha20.json",
+    "tea_delta": {
+      "file": "tea_delta.json",
       "source": "generic"
     }
   }

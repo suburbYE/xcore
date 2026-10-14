@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _isolate  # noqa: E402,F401  — must precede every xchat import below
 
 from xchat import LLMRouter, CaseLearner
 
@@ -23,7 +25,9 @@ async def test():
         return
 
     # Create a minimal test binary with AES S-box
-    test_bin = Path(__file__).parent / "test_crypto.bin"
+    # resolve() 是必需的：__file__ 可能是相对路径，从别的 cwd 运行时
+    # Path(__file__).parent 会漂移出 tests/ 目录（曾产出 tests/tests/ 残留）
+    test_bin = Path(__file__).resolve().parent / "test_crypto.bin"
     aes_sbox = bytes([
         0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
         0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -62,11 +66,17 @@ async def test():
     # Clean up
     if test_bin.exists():
         test_bin.unlink()
-    kb_dir = Path(__file__).resolve().parent.parent / "xchat" / "knowledge"
+    # This test drives CaseLearner.analyze() directly, which does not persist
+    # anything, so there is nothing of its own to remove. It used to delete
+    # every *.json under xchat/knowledge — the wrong directory (the real store
+    # is <root>/knowledge, per config.KNOWLEDGE_DIR) and a data-loss hazard if
+    # that path ever came into existence. Assert the real store is intact
+    # instead of assuming it.
+    kb_dir = Path(__file__).resolve().parent.parent / "knowledge"
     if kb_dir.exists():
-        for f in kb_dir.glob("*.json"):
-            f.unlink()
-        kb_dir.rmdir()
+        kept = len(list(kb_dir.glob("*.json")))
+        print(f"knowledge/ intact: {kept} entries")
+        assert kept > 0, "knowledge/ is empty — something deleted the L1 store"
 
     print("\n[PASS]")
 

@@ -10,6 +10,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { PEParser, detectFormat } = require("./pe_parser.js");
 
 // ─── ELF 常量 ───────────────────────────────────────────────────────────────
 const EI_CLASS      = 4;
@@ -99,16 +100,59 @@ function boyerMooreSearch(haystack, needle) {
   return results;
 }
 
+// 通配符搜索：pattern 由 tokens 描述，支持三类字节匹配：
+//   - "??"        任意字节
+//   - "[xx-yy]"   范围字节（十六进制小写），如 "[80-9f]"
+//   - "xx"        精确字节
+// 用于指令级常量链（如 AArch64 mov/movk 的寄存器位不固定），Boyer-Moore 无法直接支持，
+// 这里用朴素滑动窗口，仅当 pattern 含通配/范围时启用。
+function parseFpPattern(pattern) {
+  const tokens = [];
+  const re = /\[[0-9a-f]{2}-[0-9a-f]{2}\]|\?\?|[0-9a-f]{2}/gi;
+  let m;
+  while ((m = re.exec(pattern)) !== null) {
+    const t = m[0].toLowerCase();
+    if (t === "??") {
+      tokens.push(null); // null = 任意字节
+    } else if (t.startsWith("[")) {
+      const [lo, hi] = t.slice(1, -1).split("-").map(x => parseInt(x, 16));
+      tokens.push([lo, hi]); // [min, max] 范围
+    } else {
+      tokens.push(parseInt(t, 16));
+    }
+  }
+  return tokens;
+}
+
+function matchToken(byteVal, token) {
+  if (token === null) return true;
+  if (Array.isArray(token)) return byteVal >= token[0] && byteVal <= token[1];
+  return byteVal === token;
+}
+
+function wildcardSearch(haystack, tokens) {
+  const results = [];
+  const n = haystack.length;
+  const m = tokens.length;
+  if (m === 0 || m > n) return results;
+  for (let i = 0; i <= n - m; i++) {
+    let j = 0;
+    while (j < m && matchToken(haystack[i + j], tokens[j])) j++;
+    if (j === m) results.push(i);
+  }
+  return results;
+}
+
 // ─── L2 常量池扫描 ─────────────────────────────────────────────────────────
-function scanConstants(buf, sections) {
+function scanConstants(buf, sections, maxScanSize) {
   const hits = [];
-  const rodataSec = sections.find(s => s.name === ".rodata");
+  // ELF: .rodata/.data；PE: .rdata/.data
+  const rodataSec = sections.find(s => s.name === ".rodata") || sections.find(s => s.name === ".rdata");
   const dataSec   = sections.find(s => s.name === ".data");
   const searchSections = [rodataSec, dataSec].filter(Boolean);
 
   if (searchSections.length === 0) return { hits: [], score: 0 };
 
-  const MAX_SCAN = 20 * 1024 * 1024;
   const uniqueFamilies = new Set();
 
   for (const [name, hex] of Object.entries(CRYPTO_CONSTANTS)) {
@@ -117,7 +161,8 @@ function scanConstants(buf, sections) {
 
     for (const sec of searchSections) {
       if (!sec || sec.sh_size === 0) continue;
-      const scanSize = Math.min(sec.sh_size, MAX_SCAN);
+      // --max-scan-size 0 = 全量扫描（不截断）
+      const scanSize = (maxScanSize > 0) ? Math.min(sec.sh_size, maxScanSize) : sec.sh_size;
       const secBuf = buf.slice(sec.sh_offset, sec.sh_offset + scanSize);
 
       const matches = boyerMooreSearch(secBuf, needle);
@@ -153,6 +198,27 @@ function scanConstants(buf, sections) {
 
 // ─── L3 导入符号扫描 ────────────────────────────────────────────────────────
 function scanImports(buf, sections, parser) {
+  // PE 分支：走导入表（getImports），L3 语义等价
+  if (parser instanceof PEParser) {
+    const hits = [];
+    const imports = parser.getImports();
+    const CRYPTO_IMPORT_PATTERNS = [
+      "HMAC_", "AES_", "SHA", "EVP_", "MD5_", "RSA_", "ECDSA_",
+      "CRYPTO_", "OPENSSL_", "BoringSSL", "RAND_", "PKCS"
+    ];
+    for (const imp of imports) {
+      const name = `${imp.dll}!${imp.func}`;
+      for (const pat of CRYPTO_IMPORT_PATTERNS) {
+        if (imp.func.includes(pat) || imp.dll.includes(pat)) {
+          hits.push({ symbol: name, value: `0x0` });
+          break;
+        }
+      }
+    }
+    const score = Math.min(0.10, hits.length * 0.02);
+    return { hits, score, source: "pe_imports" };
+  }
+
   const hits = [];
   const symSec = sections.find(s => s.sh_type === SHT_DYNSYM);
   if (!symSec) return { hits: [], score: 0 };
@@ -192,6 +258,10 @@ function scanImports(buf, sections, parser) {
 }
 
 // ─── L4 指纹库匹配 ──────────────────────────────────────────────────────────
+// L1 规则引擎有 noise-gate 会跳过 <5 字节的 hex 模式；指纹层原先没有同等闸门，
+// 于是 4 字节的 crc32_poly（20 83 b8 ed）在多 MB 文件里靠巧合就能命中。
+const MIN_FP_PATTERN_BYTES = 5;
+
 function scanFingerprints(buf, fingerprintsDir) {
   const hits = [];
   let totalScore = 0;
@@ -213,18 +283,75 @@ function scanFingerprints(buf, fingerprintsDir) {
 
     if (!fp.patterns || !Array.isArray(fp.patterns)) continue;
 
+    // 弱指纹降权：weak=true 的指纹（如递增 IV 表等数据表类弱特征）在大型二进制
+    // （Unity IL2CPP 等）中极易被数据区碰巧命中。
+    //
+    // max_hits 限制的是「同一个 pattern 出现多少次」，但实测证明这个方向是错的：
+    // libhash_x_iv 在 kernel_drv_x.sys（某厂商内核驱动）里命中，匹配的是一张 256 字节
+    // 恒等表（00 01 02…0F + 30 31…3F，相距 0x30）—— 任何做数字格式化的程序都有这张表，
+    // 且它天然只出现 1-2 次，永远过不了 max_hits 这道闸。
+    //
+    // 真正该看的是「这个 pattern 本身有多通用」：恒等表、连续字节序列这类结构在任何
+    // 二进制里都可能存在，靠出现次数抑制不住。所以对弱指纹再加一道「通用性」判据。
+    const isWeak = fp.weak === true;
+    const maxHits = (typeof fp.max_hits === "number") ? fp.max_hits : 3;
+
+    // 通用模式检测：连续的 0..N 递增序列、纯 ASCII 数字串、纯 0x00/0xFF 填充。
+    // 这些结构出现即视为巧合，不参与弱指纹判定。
+    const isGenericPattern = (patStr) => {
+      const bytes = patStr.replace(/\s+/g, "").match(/../g);
+      if (!bytes || bytes.length < 4) {
+        // 短于 4 字节的模式在 MB 级文件里没有区分度
+        return true;
+      }
+      const vals = bytes.map(b => parseInt(b, 16)).filter(v => !Number.isNaN(v));
+      if (vals.length !== bytes.length) return false;  // 含通配符，交给原有逻辑
+      // 连续递增序列（步长 1）：00 01 02 … / 30 31 32 …
+      let asc = true;
+      for (let i = 1; i < vals.length; i++) {
+        if (vals[i] !== (vals[i - 1] + 1) & 0xff) { asc = false; break; }
+      }
+      if (asc && vals.length >= 4) return true;
+      // 全是可打印 ASCII（数字/字母表片段）
+      if (vals.every(v => v >= 0x20 && v < 0x7f)) return true;
+      // 全 0 或全 FF 填充
+      if (vals.every(v => v === 0x00) || vals.every(v => v === 0xff)) return true;
+      return false;
+    };
+
     const matchedPatterns = [];
+    const weakDiscarded = [];
+    const genericDiscarded = [];
     for (const patStr of fp.patterns) {
-      // 去除空格，转换为字节
-      const hex = patStr.replace(/\s+/g, "");
+      // 指纹层原先没有 rules.json 那道 noise-gate（跳过 <5 字节的模式），
+      // 于是 4 字节的 crc32_poly 在多 MB 文件里靠巧合就命中。这里补上同等判据。
+      const bareHex = patStr.replace(/\s+/g, "").replace(/\?\?/g, "ff");
+      if (bareHex.length / 2 < MIN_FP_PATTERN_BYTES) {
+        genericDiscarded.push({ pattern: patStr, count: 0 });
+        continue;
+      }
+      if (isGenericPattern(patStr)) {
+        genericDiscarded.push({ pattern: patStr, count: 0 });
+        continue;
+      }
+      // 去除空格；支持 "??"（任意字节）与 "[xx-yy]"（范围）通配符，用于指令级常量链
+      const hex = patStr.replace(/\s+/g, "").replace(/\?\?/g, "ff").replace(/\[[0-9a-f]{2}-[0-9a-f]{2}\]/g, "ff");
       const needle = Buffer.from(hex, "hex");
-      const matches = boyerMooreSearch(buf, needle);
+      const hasWildcard = patStr.includes("??") || /\[[0-9a-f]{2}-[0-9a-f]{2}\]/.test(patStr);
+      const matches = hasWildcard
+        ? wildcardSearch(buf, parseFpPattern(patStr.replace(/\s+/g, "")))
+        : boyerMooreSearch(buf, needle);
       if (matches.length > 0) {
-        matchedPatterns.push({
+        const item = {
           pattern: patStr,
           count: matches.length,
           locations: matches.slice(0, 3).map(m => `0x${m.toString(16)}`)
-        });
+        };
+        if (isWeak && matches.length > maxHits) {
+          weakDiscarded.push(item);
+        } else {
+          matchedPatterns.push(item);
+        }
       }
     }
 
@@ -235,16 +362,28 @@ function scanFingerprints(buf, fingerprintsDir) {
     if (dec === "OR") {
       triggered = matchedPatterns.length >= minHits;
     } else if (dec === "AND") {
-      triggered = matchedPatterns.length >= fp.patterns.length && matchedPatterns.length >= minHits;
+      // 弱指纹的 AND 仅要求有效（未剔除）pattern 数达到 min_hits；
+      // 普通指纹保持原语义：全部 pattern 命中。
+      triggered = isWeak
+        ? matchedPatterns.length >= minHits
+        : matchedPatterns.length >= fp.patterns.length && matchedPatterns.length >= minHits;
     }
 
     if (triggered) {
-      hits.push({
+      const hitEntry = {
         fingerprint: fp.name,
         algorithm: fp.algorithm,
         source: fp.source || "unknown",
         matched_patterns: matchedPatterns
-      });
+      };
+      if (weakDiscarded.length > 0) {
+        hitEntry.weak_discarded = weakDiscarded.map(d => `${d.pattern}(${d.count})`);
+      }
+      if (genericDiscarded.length > 0) {
+        // 显式暴露被通用性判据剔除的模式，便于回看是否误伤
+        hitEntry.generic_discarded = genericDiscarded.map(d => d.pattern);
+      }
+      hits.push(hitEntry);
       totalScore += 0.25; // L4 每个命中指纹 +0.25，上限由外部 cap
     }
   }
@@ -323,11 +462,12 @@ class MiniELFParser {
 // ─── 命令行 ─────────────────────────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { so: null, fingerprintsDir: null, json: false };
+  const opts = { so: null, fingerprintsDir: null, json: false, maxScanSize: 0 };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--so" && i + 1 < args.length) opts.so = args[++i];
     else if (args[i] === "--fingerprints-dir" && i + 1 < args.length) opts.fingerprintsDir = args[++i];
     else if (args[i] === "--json") opts.json = true;
+    else if (args[i] === "--max-scan-size" && i + 1 < args.length) opts.maxScanSize = parseInt(args[++i], 10) || 0;
   }
   if (!opts.so) {
     console.error("Usage: node constant_scanner.js --so <path> --fingerprints-dir <dir> [--json]");
@@ -336,25 +476,72 @@ function parseArgs() {
   return opts;
 }
 
+// ─── 文件头解析（ELF / PE / Mach-O）────────────────────────────────────────
+// 返回架构字符串，未知格式返回 "unknown"
+function detectArch(buf) {
+  if (!buf || buf.length < 2) return "unknown";
+  const magic = buf.toString("latin1", 0, 4);
+
+  // ELF: \x7fELF
+  if (magic === "\x7fELF") {
+    const eiData = buf[5];
+    const isLE = eiData === 1;
+    const eMachine = isLE ? buf.readUInt16LE(18) : buf.readUInt16BE(18);
+    if (eMachine === EM_AARCH64) return "arm64";
+    if (eMachine === EM_ARM)     return "arm32";
+    if (eMachine === EM_X86_64)  return "x86_64";
+    return "unknown";
+  }
+
+  // PE: MZ 魔数 + e_lfanew 偏移处 PE\0\0 + IMAGE_FILE_HEADER.Machine
+  if (buf[0] === 0x4D && buf[1] === 0x5A) { // 'M''Z'
+    if (buf.length < 0x40) return "unknown";
+    const e_lfanew = buf.readUInt32LE(0x3C);
+    if (buf.toString("latin1", e_lfanew, e_lfanew + 4) !== "PE\x00\x00") return "unknown";
+    const machine = buf.readUInt16LE(e_lfanew + 4);
+    if (machine === 0x8664) return "x86_64";      // IMAGE_FILE_MACHINE_AMD64
+    if (machine === 0x014C) return "x86";          // IMAGE_FILE_MACHINE_I386
+    if (machine === 0xAA64) return "arm64";        // IMAGE_FILE_MACHINE_ARM64
+    if (machine === 0x01C0 || machine === 0x01C4) return "arm32"; // ARM / ARMNT
+    return "unknown";
+  }
+
+  // Mach-O: 0xfeedface / 0xfeedfacf / 0xcefaedfe / 0xcffaedfe
+  if (magic === "\xfe\xed\xfa\xce" || magic === "\xfe\xed\xfa\xcf" ||
+      magic === "\xce\xfa\xed\xfe" || magic === "\xcf\xfa\xed\xfe") {
+    return "macho";
+  }
+
+  return "unknown";
+}
+
 function main() {
   const opts = parseArgs();
   const buf = fs.readFileSync(opts.so);
-  const parser = new MiniELFParser(buf);
-  const sections = parser.getSections();
 
-  const arch = parser.e_machine === EM_AARCH64 ? "arm64" :
-               parser.e_machine === EM_ARM ? "arm32" :
-               parser.e_machine === EM_X86_64 ? "x86_64" : "unknown";
+  // 按文件格式选择解析器：ELF → MiniELFParser，PE → PEParser，其他 → 无 section
+  const fmt = detectFormat(buf);
+  const isELF = fmt === "elf";
+  const arch = detectArch(buf);
+  let sections = [];
+  let parser = null;
+  if (isELF) {
+    parser = new MiniELFParser(buf);
+    sections = parser.getSections();
+  } else if (fmt === "pe") {
+    parser = new PEParser(buf);
+    sections = parser.getSections();
+  }
 
   if (!opts.json) {
     console.error(`[constant_scanner] Target: ${opts.so}`);
-    console.error(`[constant_scanner] Arch: ${arch}`);
+    console.error(`[constant_scanner] Arch: ${arch} (format: ${fmt})`);
   }
 
   // L2: 常量池
-  const l2 = scanConstants(buf, sections);
-  // L3: 导入符号
-  const l3 = scanImports(buf, sections, parser);
+  const l2 = scanConstants(buf, sections, opts.maxScanSize);
+  // L3: 导入符号（ELF dynsym / PE import table）
+  const l3 = parser ? scanImports(buf, sections, parser) : { hits: [], score: 0 };
   // L4: 指纹库
   const l4 = scanFingerprints(buf, opts.fingerprintsDir || path.join(__dirname, "..", "..", "rules", "fingerprints", "algorithms"));
 

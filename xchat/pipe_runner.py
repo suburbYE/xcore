@@ -217,8 +217,11 @@ def _parse_shell_classifier(stdout: str, stderr: str) -> dict:
     return result
 
 
-async def run_xcore_pipe(file_path: str) -> dict:
-    """Run xcore pipe on a file, return structured scan result."""
+async def run_xcore_pipe(file_path: str, max_scan_size: int = 0) -> dict:
+    """Run xcore pipe on a file, return structured scan result.
+
+    ``max_scan_size``: 0 = 全量读取（不截断）；>0 时仅读前 N 字节。
+    """
     if not XCORE_BIN.exists():
         return {"error": f"xcore.exe not found at {XCORE_BIN}", "hits": []}
     if not RULES_PATH.exists():
@@ -229,7 +232,10 @@ async def run_xcore_pipe(file_path: str) -> dict:
 
         def _run():
             with open(file_path, "rb") as f:
-                data = f.read(262144)  # first 256KB (was 64KB)
+                if max_scan_size > 0:
+                    data = f.read(max_scan_size)
+                else:
+                    data = f.read()  # 全量
             proc = subprocess.run(
                 [str(XCORE_BIN), "pipe", str(RULES_PATH),
                  "--fingerprints-dir", str(FINGERPRINTS_DIR),

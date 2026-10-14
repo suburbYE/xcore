@@ -102,7 +102,32 @@ class CaseLearner:
         }
 
     def save(self, sha256_hash: str, analysis: dict):
-        """Persist analysis to knowledge DB."""
+        """Persist analysis to knowledge DB.
+
+        Applies a confidence downweight guard (P2-1): if every reported block
+        names the *same* algorithm with confidence > 0.9, that is a classic
+        local-LLM hallucination pattern (e.g. IL2CPP / VMP binary where every
+        chunk confidently reports AES/SHA-256).  Such records are rejected
+        instead of polluting the knowledge DB.
+        """
+        algos = analysis.get("algorithms", [])
+        if algos:
+            names = {a.get("name") for a in algos if a.get("name")}
+            confs = [a.get("confidence", 0) for a in algos]
+            if (
+                len(names) == 1
+                and confs
+                and len(confs) >= 2
+                and all(float(c) > 0.9 for c in confs)
+            ):
+                print(
+                    f"  [learn] SUSPECT: {len(algos)} blocks all report "
+                    f"'{next(iter(names))}' with conf>0.9 — rejecting as LLM "
+                    f"noise (P2-1 downweight).",
+                    flush=True,
+                )
+                return
+
         fname = KNOWLEDGE_DIR / f"{sha256_hash[:16]}.json"
         existing = {}
         if fname.exists():
@@ -120,10 +145,27 @@ class CaseLearner:
     MIN_LEARN_SIZE = 256  # skip tiny/empty files to prevent LLM hallucination
 
     async def learn(self, name: str, data: bytes, sha256_hash: str, pipe_hits: dict) -> dict | None:
-        """Full pipeline: analyze → save → return."""
+        """Full pipeline: analyze → save → return.
+
+        P2-1 pre-filter: if the native scanner returned final_score == 0
+        (no structural evidence), skip deep analysis — the local LLM has no
+        signal to ground on and reliably hallucinates (e.g. pure IL2CPP
+        binaries "confidently" flagged as AES).  Garbage-in guard.
+        """
         if len(data) < self.MIN_LEARN_SIZE:
             print(f"  [learn] {name} ({len(data)} bytes) SKIP < {self.MIN_LEARN_SIZE}", flush=True)
             return None
+
+        # Native pipeline: no structural score → nothing for the LLM to build on.
+        final_score = pipe_hits.get("final_score", None) if isinstance(pipe_hits, dict) else None
+        if final_score is not None and float(final_score) == 0:
+            print(
+                f"  [learn] {name} SKIP: native scanner score=0 "
+                f"(no crypto evidence; P2-1 pre-filter)",
+                flush=True,
+            )
+            return None
+
         print(f"  [learn] {name} ({len(data)} bytes)", flush=True)
         analysis = await self.analyze(name, data, pipe_hits)
         if analysis:

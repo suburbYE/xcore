@@ -32,13 +32,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .config import DIALOG_MODEL
+
 
 # ────────────────────────────────────────────────────────────
 # 常量
 # ────────────────────────────────────────────────────────────
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen2.5:14b"
+# 跟随全局单一本地模型，避免子系统各自拉起额外的 7B/14B 占用显存
+DEFAULT_MODEL = DIALOG_MODEL
 MAX_RETRIES = 3
 RETRY_DELAY = 1.5  # seconds
 

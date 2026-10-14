@@ -27,6 +27,7 @@ struct VerifyResult {
 class Verifier {
     std::string node_path;
     std::string runner_path;
+    std::string entry_expr;
 
     static std::string exec_cmd(const std::string& cmd) {
         char buf[256];
@@ -57,21 +58,27 @@ class Verifier {
     }
 
 public:
-    Verifier(const std::string& node, const std::string& runner)
-        : node_path(node), runner_path(runner) {}
+    Verifier(const std::string& node, const std::string& runner,
+             const std::string& entry = "window.ParamsSign.sign")
+        : node_path(node), runner_path(runner), entry_expr(entry) {}
 
     VerifyResult verify(const std::string& original_js,
                         const std::string& flattened_js) {
         VerifyResult r;
 
+        // 入口表达式必须与 deobfuscate 主流程一致，否则两边都取不到 h5st
+        const std::string entry_arg = " --entry \"" + entry_expr + "\"";
+
         std::string cmd1 = node_path + " \"" + runner_path + "\""
                          + " --input \"" + original_js + "\""
+                         + entry_arg
                          + " --freeze --json 2>&1";
         std::string out1 = exec_cmd(cmd1);
         r.original_h5st = extract_h5st(out1);
 
         std::string cmd2 = node_path + " \"" + runner_path + "\""
                          + " --input \"" + flattened_js + "\""
+                         + entry_arg
                          + " --freeze --json 2>&1";
         std::string out2 = exec_cmd(cmd2);
         r.flattened_h5st = extract_h5st(out2);

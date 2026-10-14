@@ -138,17 +138,64 @@ void CaseDB::init_schema() {
             scan_date     TEXT NOT NULL,
             rules_hits    TEXT NOT NULL,
             llm_algorithms TEXT,
-            llm_confidence TEXT,
+            evidence_confidence TEXT DEFAULT '0.00',
+            confidence_source   TEXT DEFAULT 'none',
             llm_raw_response TEXT,
             notes         TEXT DEFAULT '',
             created_at    TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_cases_hash ON cases(file_hash);
-        CREATE INDEX IF NOT EXISTS idx_cases_confidence ON cases(llm_confidence);
         PRAGMA journal_mode=WAL;
         PRAGMA synchronous=NORMAL;
     )";
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+
+    // ─── Migration: pre-2026-09-26 databases have llm_confidence instead of
+    //     evidence_confidence + confidence_source.
+    //
+    //     CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so the two
+    //     new columns must be added explicitly. The old llm_confidence column is
+    //     deliberately LEFT IN PLACE: retyping a table to drop a column risks the
+    //     existing 23 cases, and those rows are the only record of what the
+    //     old (untrusted) model self-reports looked like. It is simply no longer
+    //     read or written.
+    auto has_column = [&](const char* name) -> bool {
+        sqlite3_stmt* st = nullptr;
+        std::string q = std::string("SELECT ") + name + " FROM cases LIMIT 1";
+        bool ok = (sqlite3_prepare_v2(db, q.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        if (st) sqlite3_finalize(st);
+        return ok;
+    };
+
+    bool added = false;
+    if (!has_column("evidence_confidence")) {
+        sqlite3_exec(db, "ALTER TABLE cases ADD COLUMN evidence_confidence TEXT DEFAULT '0.00'",
+                     nullptr, nullptr, nullptr);
+        added = true;
+    }
+    if (!has_column("confidence_source")) {
+        sqlite3_exec(db, "ALTER TABLE cases ADD COLUMN confidence_source TEXT DEFAULT 'none'",
+                     nullptr, nullptr, nullptr);
+        added = true;
+    }
+
+    // Any row still carrying the old model self-report is untrusted by
+    // construction: it was scored by the model, not by evidence. Demote it to
+    // 0.00 / "llm-only" so it can never be counted as verified. Idempotent —
+    // after the first run there is nothing left in the legacy column that the
+    // new columns have not already been set for.
+    if (added) {
+        sqlite3_exec(db,
+            "UPDATE cases SET evidence_confidence='0.00', confidence_source='llm-only' "
+            "WHERE (confidence_source IS NULL OR confidence_source='none') "
+            "AND llm_confidence IS NOT NULL AND llm_confidence != ''",
+            nullptr, nullptr, nullptr);
+    }
+
+    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_cases_confidence ON cases(evidence_confidence)",
+                 nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_cases_conf_source ON cases(confidence_source)",
+                 nullptr, nullptr, nullptr);
 }
 
 // ─── Row parser ──────────────────────────────────────────
@@ -169,15 +216,18 @@ CaseInfo CaseDB::row_to_case(void* stmt_ptr) {
     if (algos) c.llm_algorithms = nlohmann::json::parse(algos);
 
     const char* conf  = (const char*)sqlite3_column_text(stmt, 7);
-    if (conf) c.llm_confidence = conf;
+    if (conf) c.evidence_confidence = conf;
 
-    const char* raw   = (const char*)sqlite3_column_text(stmt, 8);
+    const char* csrc  = (const char*)sqlite3_column_text(stmt, 8);
+    if (csrc) c.confidence_source = csrc;
+
+    const char* raw   = (const char*)sqlite3_column_text(stmt, 9);
     if (raw) c.llm_raw_response = raw;
 
-    const char* notes = (const char*)sqlite3_column_text(stmt, 9);
+    const char* notes = (const char*)sqlite3_column_text(stmt, 10);
     if (notes) c.notes = notes;
 
-    const char* cat   = (const char*)sqlite3_column_text(stmt, 10);
+    const char* cat   = (const char*)sqlite3_column_text(stmt, 11);
     if (cat) c.created_at = cat;
 
     return c;
@@ -189,9 +239,9 @@ bool CaseDB::insert_case(const CaseInfo& ci) {
     auto* db = db_ptr(db_);
     const char* sql = R"(
         INSERT INTO cases (file_hash, file_path, file_size, scan_date,
-                          rules_hits, llm_algorithms, llm_confidence,
-                          llm_raw_response, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          rules_hits, llm_algorithms, evidence_confidence,
+                          confidence_source, llm_raw_response, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     )";
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -210,9 +260,10 @@ bool CaseDB::insert_case(const CaseInfo& ci) {
         sqlite3_bind_text(stmt, 4, date.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, rules_json.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 6, algos_json.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 7, ci.llm_confidence.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 8, ci.llm_raw_response.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 9, ci.notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, ci.evidence_confidence.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, ci.confidence_source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, ci.llm_raw_response.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, ci.notes.c_str(), -1, SQLITE_TRANSIENT);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -223,14 +274,15 @@ bool CaseDB::upsert_case(const CaseInfo& ci) {
     auto* db = db_ptr(db_);
     const char* sql = R"(
         INSERT INTO cases (file_hash, file_path, file_size, scan_date,
-                          rules_hits, llm_algorithms, llm_confidence,
-                          llm_raw_response, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          rules_hits, llm_algorithms, evidence_confidence,
+                          confidence_source, llm_raw_response, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_hash) DO UPDATE SET
             file_path=excluded.file_path, file_size=excluded.file_size,
             scan_date=excluded.scan_date, rules_hits=excluded.rules_hits,
             llm_algorithms=excluded.llm_algorithms,
-            llm_confidence=excluded.llm_confidence,
+            evidence_confidence=excluded.evidence_confidence,
+            confidence_source=excluded.confidence_source,
             llm_raw_response=excluded.llm_raw_response,
             notes=excluded.notes
     )";
@@ -246,9 +298,10 @@ bool CaseDB::upsert_case(const CaseInfo& ci) {
     sqlite3_bind_text(stmt, 4, ci.scan_date.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, rules_json.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 6, algos_json.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 7, ci.llm_confidence.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 8, ci.llm_raw_response.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 9, ci.notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, ci.evidence_confidence.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, ci.confidence_source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, ci.llm_raw_response.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, ci.notes.c_str(), -1, SQLITE_TRANSIENT);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -343,6 +396,68 @@ static std::vector<RuleHit> extract_rule_hits(const nlohmann::json& scan) {
         }
     }
     return hits;
+}
+
+// ─── Evidence confidence (engine-computed; the model has no say) ──────────
+//
+// WHY THIS EXISTS
+// ---------------
+// Previously `confidence` was read straight out of the LLM's JSON blob:
+//     if (j.contains("confidence")) confidence = j["confidence"];   // model self-report
+// The model reported 0.95 on essentially everything, including cases where it had
+// invented the algorithm outright. That is how 94 hallucinated knowledge entries
+// accumulated. The classifier prompt now forbids emitting a confidence value at
+// all; this function is the replacement, and it derives confidence from evidence
+// the engine can actually verify.
+//
+// SCORING
+// -------
+//   manual     a human confirmed it                                   -> 1.00
+//   rules      >=1 rule fired, score = 0.40 + 0.15*(n-1),
+//              +0.10 if any weight-5 rule fired, capped at 0.95
+//   llm-only   LLM named an algorithm but NO rule fired               -> 0.00
+//   none       nothing fired and the LLM named nothing                -> 0.00
+//
+// "llm-only" scoring 0.00 is the whole point: it cannot reach the trusted band.
+void CaseDB::compute_confidence(CaseInfo& ci) {
+    // Rules give us the only machine-verifiable signal.
+    auto hits = extract_rule_hits(ci.rules_hits);
+
+    std::set<std::string> distinct;
+    bool hard_feature = false;
+    for (const auto& h : hits) {
+        if (!h.rule_id.empty()) distinct.insert(h.rule_id);
+        if (h.weight >= 5) hard_feature = true;
+    }
+    const size_t n = distinct.size();
+
+    if (n > 0) {
+        double score = 0.40 + 0.15 * static_cast<double>(n - 1);
+        if (hard_feature) score += 0.10;
+        score = std::min(score, 0.95);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.2f", score);
+        ci.evidence_confidence = buf;
+        ci.confidence_source   = "rules";
+        return;
+    }
+
+    // No rule fired. Did the LLM nonetheless claim an algorithm?
+    bool llm_claimed = false;
+    if (ci.llm_algorithms.is_array()) {
+        for (const auto& a : ci.llm_algorithms) {
+            std::string name = a.is_string() ? a.get<std::string>()
+                             : (a.is_object() ? a.value("name", "") : "");
+            // "none" / "" are explicit non-claims, not claims.
+            if (!name.empty() && name != "none") { llm_claimed = true; break; }
+        }
+    } else if (ci.llm_algorithms.is_string()) {
+        std::string s = ci.llm_algorithms.get<std::string>();
+        llm_claimed = (!s.empty() && s != "none");
+    }
+
+    ci.evidence_confidence = "0.00";
+    ci.confidence_source   = llm_claimed ? "llm-only" : "none";
 }
 
 // Weighted Jaccard: J_w = Σ(w_i for i∈A∩B) / Σ(w_i for i∈A∪B)
@@ -465,13 +580,28 @@ nlohmann::json CaseDB::stats() {
     }
     sqlite3_finalize(stmt);
 
-    // Confidence distribution
+    // Confidence distribution — engine-computed only.
+    // Grouped by source so untrusted entries ("llm-only") are visible as such
+    // instead of being averaged into a misleading single number.
     s["confidence_dist"] = nlohmann::json::object();
     sqlite3_prepare_v2(db,
-        "SELECT llm_confidence, COUNT(*) FROM cases WHERE llm_confidence IS NOT NULL AND llm_confidence != '' GROUP BY llm_confidence",
+        "SELECT evidence_confidence, COUNT(*) FROM cases "
+        "WHERE evidence_confidence IS NOT NULL AND evidence_confidence != '' "
+        "GROUP BY evidence_confidence",
         -1, &stmt, nullptr);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         s["confidence_dist"][(const char*)sqlite3_column_text(stmt, 0)] = sqlite3_column_int(stmt, 1);
+    }
+    sqlite3_finalize(stmt);
+
+    s["confidence_by_source"] = nlohmann::json::object();
+    sqlite3_prepare_v2(db,
+        "SELECT confidence_source, COUNT(*) FROM cases "
+        "GROUP BY confidence_source",
+        -1, &stmt, nullptr);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* src = (const char*)sqlite3_column_text(stmt, 0);
+        s["confidence_by_source"][src ? src : "none"] = sqlite3_column_int(stmt, 1);
     }
     sqlite3_finalize(stmt);
 
@@ -497,13 +627,14 @@ bool CaseDB::store_classify_result(const std::string& file_path,
     std::string hash = sha256_file(file_path);
     if (hash.empty()) return false;
 
-    // Parse LLM response
+    // Parse LLM response.
+    // NOTE: deliberately does NOT read a "confidence" field. The model is forbidden
+    // from emitting one (see prompts::classifier); confidence is computed by the
+    // engine from rule evidence below. Reading it here was the original bug.
     nlohmann::json llm_algs = nlohmann::json::array();
-    std::string confidence;
     try {
         auto j = nlohmann::json::parse(llm_response_json);
         if (j.contains("algorithms")) llm_algs = j["algorithms"];
-        if (j.contains("confidence")) confidence = j["confidence"];
     } catch (...) {}
 
     // Get file size
@@ -526,8 +657,11 @@ bool CaseDB::store_classify_result(const std::string& file_path,
     ci.scan_date        = format_date();
     ci.rules_hits       = scan_result;
     ci.llm_algorithms   = llm_algs;
-    ci.llm_confidence   = confidence;
     ci.llm_raw_response = llm_response_json;
+
+    // Confidence is derived from evidence the engine can verify, never from the
+    // model's self-assessment.
+    compute_confidence(ci);
 
     return upsert_case(ci);
 }

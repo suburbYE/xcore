@@ -1,11 +1,11 @@
 {
   "name": "quic_sbox_v1",
   "algorithm": "Custom XOR+ROR13 with QUIC S-box",
-  "source": "mobile_app_v2026_03",
+  "source": "sample_a_2026_03",
   "patterns": [
-    "515549435f53545245414d5f53455155454e4345525f494e56414c49445f5354415445",
-    "4786c861"
+    "515549435f53545245414d5f53455155454e4345525f494e56414c49445f5354415445"
   ],
   "decision": "OR",
-  "min_hits": 1
+  "min_hits": 1,
+  "note": "2026-09-18: removed '4786c861' pattern — it is the little-endian byte order of XXTEA delta 0x61c88647, not a QUIC S-box magic; caused false hits in any binary using XXTEA (e.g. zmd/ark). Kept only the QUIC state-string pattern."
 }

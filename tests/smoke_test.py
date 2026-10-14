@@ -121,9 +121,19 @@ def test_page_align():
     """Test: _page_align 三函数"""
     assert _page_align_down(0x1234) == 0x1000
     assert _page_align_up(0x1234)   == 0x2000
+
+    # 单页场景：[0x1234, 0x179B) 完全落在 0x1000~0x2000 内
+    # size 是对齐后覆盖的字节数（0x1000），不是对齐后的结束地址（0x2000）
     base, size = _page_align_size(0x1234, 0x567)
     assert base == 0x1000
-    assert size == 0x2000
+    assert size == 0x1000, f"expected one 4K page, got 0x{size:x}"
+    assert base + size == _page_align_up(0x1234 + 0x567)
+
+    # 跨页场景：[0x1F00, 0x2F00) 横跨两页 → 对齐后必须覆盖 0x1000~0x3000
+    base2, size2 = _page_align_size(0x1F00, 0x1000)
+    assert base2 == 0x1000
+    assert size2 == 0x2000, f"expected two 4K pages, got 0x{size2:x}"
+
     print("[PASS] test_page_align")
 
 def test_bb_extractor():

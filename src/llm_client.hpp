@@ -39,18 +39,48 @@ struct LLMResponse {
 namespace prompts {
     // Phase 1: classify what was found
     constexpr const char* classifier = R"(
-You are a reverse engineering analysis engine. Given structured scan results from a binary file,
-identify what cryptographic primitives or protocols are likely present.
+You are a reverse engineering evidence reporter. You are given structured scan
+results from a binary. Your job is to report ONLY what the supplied evidence
+supports. You are NOT required to identify an algorithm.
 
-Respond in JSON only: {"algorithms":["aes-128-cbc","rsa-2048",...],"confidence":"high|medium|low","reasoning":"..."}
+DEFAULT ANSWER IS "none". Most binaries contain no identifiable crypto. Reporting
+"none" is a correct and expected outcome, not a failure to analyse.
 
-Key indicators:
-- RSA: public exponent 65537 (0x010001) + high-entropy 64B+ blocks
-- AES: high-entropy 32B blocks near key schedule constants
-- ChaCha20: "expand 32-byte k" string or 16-byte constant block
-- Base64: 64B high-entropy block at entropy 5.9+ (character table)
-- WASM bindgen: __wbindgen_ markers indicate Rust→WASM compiled crypto
-- ZSTD/LZ4: magic bytes + entropy pattern in data sections
+HARD RULES
+1. Every algorithm you report MUST cite the specific scan field that justifies it
+   (e.g. "l2_constants.hits[3] = 0x9ddfea08eb382d69", "l1_strings.raw_count=7").
+   If you cannot name the field, do not report the algorithm.
+2. Never report a combination of algorithms you did not observe separately
+   (e.g. do not emit "RSA-2048 with AES-128-CBC" unless BOTH were independently
+   evidenced by distinct fields).
+3. Never report a generic placeholder as an algorithm name. If you cannot name it,
+   use "none".
+4. Do not infer a library (OpenSSL/BoringSSL/...) from algorithm names alone.
+   Library attribution requires a version string or distinctive symbol in the
+   evidence. Otherwise set "library":"unattributed".
+5. Do NOT output a confidence value. The engine computes confidence from rule
+   hits and verification status. Your self-assessed certainty is not evidence.
+
+Respond in JSON only:
+{"algorithms":[{"name":"<specific name or none>","evidence":"<exact scan field(s)>"}],
+ "library":"<name or unattributed>",
+ "insufficient_evidence": true|false,
+ "reasoning":"<one paragraph, may say 'no evidence for any crypto primitive'>"}
+
+If the evidence is absent or too weak, respond:
+{"algorithms":[],"library":"unattributed","insufficient_evidence":true,
+ "reasoning":"no evidence for any crypto primitive in the supplied fields"}
+
+Reference indicators (a hit is necessary but NOT sufficient - always cite the field):
+- RSA: public exponent 65537 (0x010001) AND high-entropy 64B+ blocks
+- AES: key schedule constants or S-box present in .rdata (not merely high entropy)
+- ChaCha20: "expand 32-byte k" literal or 16-byte sigma constant block
+- Base64: 64-byte character table at entropy 5.9+
+- WASM bindgen: __wbindgen_ markers (indicates Rust->WASM, NOT a cipher)
+- ZSTD/LZ4: magic bytes plus matching entropy profile
+
+Note: high entropy alone is far more often compression, packing, or virtualised
+code than cryptography. Do not treat entropy as a crypto indicator by itself.
 )";
 
     // Phase 2: suggest next analysis step
@@ -65,13 +95,29 @@ Respond in JSON: {"next_step":"...","tool_suggestion":"...","expected_output":".
 
     // Phase 3: analyze specific data region
     constexpr const char* analyst = R"(
-You are analyzing a specific data region in a binary. Metadata provided, no raw bytes.
+You are analyzing ONE specific data region in a binary. You are given metadata only
+(offset, size, entropy, byte histogram, nearby strings) — never raw bytes.
 
 Region: %REGION%
 Context: %CONTEXT%
 
-Identify structure type (key schedule, lookup table, ciphertext block, padding, etc).
-Respond in JSON: {"type":"...","confidence":"...","detail":"..."}
+Your job is to say what this region most plausibly IS, or to say you cannot tell.
+
+HARD RULES
+1. "unknown" is a correct and expected answer. Most regions are ordinary data.
+   Answering "unknown" is not a failure.
+2. If you name a structure type, cite the specific metadata field that supports it
+   (e.g. "entropy=7.94 with flat byte histogram", "size=256 and 256 distinct bytes").
+   No field, no claim.
+3. Do NOT claim a key or key schedule from entropy alone. High entropy is far more
+   often compression, packing, or virtualised code than a key.
+4. Do NOT output a confidence value. The engine computes confidence from verified
+   evidence. Your self-assessed certainty is not evidence and will be ignored.
+
+Respond in JSON only:
+{"type":"<key schedule|lookup table|ciphertext block|padding|compressed|code|unknown>",
+ "evidence":"<the exact metadata field(s) that support the type>",
+ "detail":"<one sentence; may be 'no distinguishing feature in supplied metadata'>"}
 )";
 }
 

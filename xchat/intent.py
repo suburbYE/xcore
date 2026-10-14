@@ -32,16 +32,18 @@ CRITICAL RULES（关键规则，违反即 bug）:
 3. "有没有" / "列出" / "有哪些" / "查找" → find（仅列出，不分析）。
 4. 无文件名只问扫描结果 → ask.
 5. IMPORTANT（精确文件 vs 通配）:
-   - 用户给了带扩展名的完整文件名（如"sample_app_1_64_xxx.apk"）→ 直接用精确文件名做 pattern，不要转 glob
-       例："分析下textapk文件夹里的sample_app_1_64_xxx.apk" → {"action":"find_scan","dir_alias":"DESKTOP","pattern":"textapk/sample_app_1_64_xxx.apk"}
+   - 用户给了带扩展名的完整文件名（如"sample_a_app_64_xxx.apk"）→ 直接用精确文件名做 pattern，不要转 glob
+       例："分析下workspace_x文件夹里的sample_a_app_64_xxx.apk" → {"action":"find_scan","dir_alias":"DESKTOP","pattern":"workspace_x/sample_a_app_64_xxx.apk"}
    - 用户泛指"apk文件"/"所有apk"/"俩apk"/"里面的apk"（没有具体文件名）→ glob
-       例："textapk文件夹里的apk" → {"action":"find_scan","dir_alias":"DESKTOP","pattern":"textapk/**/*.apk"}
+       例："workspace_x文件夹里的apk" → {"action":"find_scan","dir_alias":"DESKTOP","pattern":"workspace_x/**/*.apk"}
    - 区分方法：输入中有完整文件名（含扩展名且看起来像真文件名，不是纯类型词）→ 精确匹配
 6. "两个" / "俩" / "多个" / "所有" 等数量词 → 仍用 find_scan，会自动扫描所有匹配文件。不要因为这个改变 action。
 7. For "wasm" → "*.wasm"; "so" → "*.so"; "js" → "*.js"; "exe" → "*.exe"; "dll" → "*.dll"; "apk" → "*.apk".
 8. Output ONLY the JSON object, nothing else. 只输出 JSON，不要其他内容。"""
 
-INTENT_TIMEOUT = 10
+# 这个值原为 3B 时代调的 10s；DIALOG_MODEL 是 14B 级，实测单轮 3~15s，
+# 10s 会让交互式意图解析频繁超时并静默退化成"不是命令"。
+INTENT_TIMEOUT = 40
 
 INTENT_DIR_ALIASES = {
     "DESKTOP": str(Path.home() / "Desktop"),

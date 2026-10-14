@@ -12,12 +12,13 @@ import json
 import os
 import re
 import glob
+import sys
 import urllib.request
 import urllib.error
 from pathlib import Path
 
 from .config import (
-    BASE_DIR, SESSION_FILE, MAX_HISTORY, REPORTS_DIR,
+    BASE_DIR, SESSION_FILE, MAX_HISTORY, REPORTS_DIR, DIALOG_MODEL,
 )
 from .intent import INTENT_PROMPT, INTENT_DIR_ALIASES, INTENT_TIMEOUT
 from .llm_router import LLMRouter
@@ -27,6 +28,8 @@ from .case_learner import CaseLearner
 
 
 class XChatSession:
+    WEB_EXTS = (".html", ".htm", ".js", ".mjs", ".wasm")
+
     def __init__(self, cloud_ok: bool = True):
         self.router = LLMRouter()
         self.cloud_ok = cloud_ok
@@ -41,6 +44,11 @@ class XChatSession:
         """
         temp_dir = BASE_DIR / "temp"
         temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Normalize bare hostnames → https://
+        if url and not re.match(r'^https?://', url, re.I):
+            url = "https://" + url
+            print(f"  (normalized → {url})", flush=True)
 
         print(f"Fetching: {url}", flush=True)
         try:
@@ -82,6 +90,13 @@ class XChatSession:
 
         out_path = temp_dir / fname
         out_path.write_bytes(data)
+        # Phase 5w: extension-less payloads that look like HTML are saved as .html
+        # so they route to the web pipeline instead of falling into native/pipe.
+        if out_path.suffix.lower() not in self.WEB_EXTS:
+            head = data[:64].lstrip().lower()
+            if head.startswith(b"<!doctype") or head.startswith(b"<html"):
+                out_path = out_path.with_suffix(".html")
+                out_path.write_bytes(data)
         print(f"Saved: {out_path} ({len(data)} bytes)", flush=True)
         await self._run_scan(str(out_path))
 
@@ -114,8 +129,66 @@ class XChatSession:
 
         if is_native:
             await self._scan_native(file_path, mode=native_mode)
+        elif ext in self.WEB_EXTS:
+            await self._scan_web(file_path)
         else:
             await self._scan_pipe(file_path)
+
+    async def _scan_web(self, file_path: str):
+        """Web pipeline path (Phase 5w): xcore modules/web
+        (web_fetcher + api_probe + wasm_analyzer via pipeline_web.js)."""
+        web_dir = BASE_DIR / "modules" / "web"
+        out_dir = BASE_DIR / "temp" / "web_out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        proc = await asyncio.create_subprocess_exec(
+            "node", str(web_dir / "pipeline_web.js"),
+            "--html", file_path, "--out", str(out_dir), "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            print(f"[!] Web scan failed: {stderr.decode(errors='replace')[:300]}")
+            return
+
+        try:
+            report = json.loads(stdout.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError as e:
+            print(f"[!] Web scan report parse error: {e}")
+            return
+
+        self.scanned_file = file_path
+        self.scan_context = report
+        self._print_web_report(report)
+
+    def _print_web_report(self, report: dict):
+        """Pretty-print a web pipeline report."""
+        stages = report.get("stages", {})
+        probe = stages.get("probe") or {}
+        hits = probe.get("hits") or []
+        wasm = stages.get("wasm") or []
+        fetch = stages.get("fetch") or {}
+        endpoints = fetch.get("endpoints") or []
+
+        print(f"\n  Web source  : {report.get('source', '?')}")
+        print(f"  Stages      : {', '.join(stages.keys()) or '-'}")
+        if endpoints:
+            print(f"  Endpoints   : {len(endpoints)}")
+            for ep in endpoints[:10]:
+                print(f"    - {ep}")
+        if hits:
+            print(f"  Probe hits  : {len(hits)}")
+            for h in hits[:8]:
+                kinds = ",".join(h.get("kinds", []))
+                print(f"    [{kinds}] {h.get('file', '?')}:{h.get('line', '?')}  {h.get('code', '?')[:70]}")
+        if wasm:
+            for w in wasm:
+                sections = [s.get("name", "?") for s in (w.get("sections") or [])]
+                print(f"  WASM        : {w.get('url', '?')}  sections=[{','.join(sections)}] exports={len(w.get('exports') or [])}")
+        artifacts = report.get("artifacts") or []
+        if artifacts:
+            print(f"  Artifacts   : {len(artifacts)} files")
 
     async def _scan_native(self, file_path: str, mode: str = "so"):
         """Native scanner path: xcore native --so/--apk."""
@@ -242,7 +315,12 @@ class XChatSession:
                 save_path = loc.strip()
             question = re.sub(r'(?:丢|保存到|写到|存到)\s*(?:桌面|.+?)(?:\s*$|，|。)', '', question).strip()
 
-        answer = await self.router.ask_3b(question, self.scan_context, cloud_ok=self.cloud_ok)
+        # Route to tool-augmented dialog when question mentions analysis targets
+        tool_hint = re.search(r'(apk|\.so|\.dll|壳|脱壳|classify|扫描|scan|frida|probe|分析|native)', question, re.IGNORECASE)
+        if tool_hint:
+            answer = await self.router.ask_with_tools(question, self.scan_context, cloud_ok=self.cloud_ok)
+        else:
+            answer = await self.router.ask_3b(question, self.scan_context, cloud_ok=self.cloud_ok)
 
         self.session_history.append({"q": question, "a": answer})
         print(f"\n{answer}\n")
@@ -295,7 +373,7 @@ class XChatSession:
                 f"Focus on algorithm details, parameters, library origins, and implementation weaknesses. "
                 f"Output ONLY one question per line, no numbering, no preamble:\n\n{hits_brief}"
             )
-            r = await self.router._ollama_chat("qwen2.5:3b", qgen_prompt, 30)
+            r = await self.router._ollama_chat(DIALOG_MODEL, qgen_prompt, INTENT_TIMEOUT)
             if r["ok"]:
                 questions = [q.strip().lstrip("1234567890.-) ").strip() for q in r["answer"].split("\n") if q.strip()]
                 questions = questions[:5]
@@ -332,32 +410,58 @@ class XChatSession:
         print(f"[5/5] Done. Report saved to {REPORTS_DIR}.")
         print("=" * 60)
 
-    async def interactive(self, file_path: str | None = None, native: bool = False):
-        """Start interactive interrogation loop with session persistence."""
-        if not APIKeyManager.load():
-            print("Cloud fallback needs an API key. When 3B and 7B both fail, cloud can take over.")
-            ans = input("Configure now? [Y/n] ").strip().lower()
-            if ans != 'n':
-                key = input("Paste API key: ").strip()
-                if key:
-                    provider = (
-                        "openai" if key.startswith("sk-")
-                        else "gemini" if key.startswith("AIza")
-                        else "deepseek"
-                    )
-                    APIKeyManager.save(provider, key)
-                    print(f"Cloud key saved (provider: {provider}).")
+    async def interactive(
+        self,
+        file_path: str | None = None,
+        native: bool = False,
+        non_interactive: bool = False,
+    ):
+        """Start interactive interrogation loop with session persistence.
+
+        Args:
+            file_path: If provided, scan this file before entering the loop.
+            native: Force Native Scanner for ``file_path``.
+            non_interactive: If True, skip all blocking ``input()`` prompts
+                (API key config / session restore) and, when ``file_path`` is
+                given, exit after scanning instead of entering the REPL.  This
+                makes ``--scan`` safe for batch scripts.
+        """
+        if not APIKeyManager.load() and not non_interactive:
+            print("Cloud fallback needs an API key (used when 3B/7B both fail).")
+            # 非 TTY（管道/批处理）下不阻塞，提示后直接继续
+            if sys.stdin.isatty():
+                ans = input("Configure now? [Y/n] ").strip().lower()
+                if ans != 'n':
+                    key = input("Paste API key: ").strip()
+                    if key:
+                        if key.startswith("AIza"):
+                            provider = "gemini"
+                        elif key.startswith("sk-"):
+                            # sk- prefix is shared by OpenAI and DeepSeek — ask explicitly
+                            provider = "deepseek"
+                            if sys.stdin.isatty():
+                                ans = input("  sk- key belongs to OpenAI or DeepSeek? [openai/deepseek] ").strip().lower()
+                                if ans == "openai":
+                                    provider = "openai"
+                        else:
+                            provider = "deepseek"
+                        APIKeyManager.add_provider(provider, key)
+                        print(f"Cloud key saved (provider: {provider}).")
+                    else:
+                        print("Cloud disabled (no key provided).")
                 else:
-                    print("Cloud disabled (no key provided).")
+                    print("Skipped. Type 'cloud' later to configure.")
             else:
-                print("Skipped. Type 'cloud' later to configure.")
+                print("Non-interactive: skipping API key prompt. Type 'cloud' later to configure.")
 
         prev = self._load_session()
-        if prev and not file_path:
+        if prev and not file_path and not non_interactive:
             questions = len(prev.get("history", []))
             if questions > 0:
                 print(f"[session] Previous session found: {questions} messages, last scan: {prev.get('scanned_file', 'none')}")
-                restore = input("Restore? [Y/n] ").strip().lower()
+                restore = "n"
+                if sys.stdin.isatty():
+                    restore = input("Restore? [Y/n] ").strip().lower()
                 if restore != 'n':
                     self.scanned_file = prev.get("scanned_file")
                     self.scan_context = prev.get("scan_summary")
@@ -378,6 +482,12 @@ class XChatSession:
 
         if file_path:
             await self.scan(file_path, native=native)
+
+        if non_interactive:
+            # Batch mode: skip the REPL entirely — persist whatever was done and exit.
+            self._save_session()
+            print("[non-interactive] Done; exiting.")
+            return
 
         print("Type 'scan <file>' to analyze, 'ask <question>' to query, 'learn' to deep-analyze, 'kb' for knowledge stats, 'exit' to quit.\n")
 
@@ -419,20 +529,43 @@ class XChatSession:
             elif cmd == "cloud":
                 self.cloud_ok = not self.cloud_ok
                 print(f"Cloud fallback: {'ON' if self.cloud_ok else 'OFF'}")
-                if self.cloud_ok and not APIKeyManager.load():
-                    print("  Cloud needs an API key. Enter provider+key, or leave blank to disable.")
-                    provider = input("  Provider (openai/deepseek/gemini): ").strip().lower()
-                    if provider in ("openai", "deepseek", "gemini"):
-                        api_key = input(f"  {provider} API key: ").strip()
-                        if api_key:
-                            APIKeyManager.save(provider, api_key)
-                            print("  Cloud key saved.")
+                if self.cloud_ok:
+                    cfg = APIKeyManager.load()
+                    if cfg and cfg.get("providers"):
+                        provs = cfg["providers"]
+                        print(f"  Current providers: {', '.join(provs.keys())} (primary: {cfg.get('primary')})")
+                        print("  Enter 'provider:key' to add/overwrite, 'primary <name>' to switch, blank to keep.")
+                        inp = input("  > ").strip()
+                        if not inp:
+                            print("  Cloud config unchanged.")
+                        elif inp.startswith("primary "):
+                            name = inp.split(" ", 1)[1].strip()
+                            if name in provs:
+                                APIKeyManager.set_primary(name)
+                                print(f"  Primary switched to {name}.")
+                            else:
+                                print(f"  Provider '{name}' not configured.")
+                        else:
+                            parts = inp.replace(":", " ").split(maxsplit=1)
+                            if len(parts) == 2 and parts[0] in ("openai", "deepseek", "gemini"):
+                                APIKeyManager.add_provider(parts[0], parts[1].strip())
+                                print(f"  Cloud key saved ({parts[0]}).")
+                            else:
+                                print("  Invalid input. Use 'provider:key' (openai/deepseek/gemini).")
+                    else:
+                        print("  Cloud needs an API key. Enter provider+key, or leave blank to disable.")
+                        provider = input("  Provider (openai/deepseek/gemini): ").strip().lower()
+                        if provider in ("openai", "deepseek", "gemini"):
+                            api_key = input(f"  {provider} API key: ").strip()
+                            if api_key:
+                                APIKeyManager.add_provider(provider, api_key)
+                                print("  Cloud key saved.")
+                            else:
+                                self.cloud_ok = False
+                                print("  Cloud disabled (no key provided).")
                         else:
                             self.cloud_ok = False
-                            print("  Cloud disabled (no key provided).")
-                    else:
-                        self.cloud_ok = False
-                        print("  Cloud disabled (invalid provider).")
+                            print("  Cloud disabled (invalid provider).")
             elif cmd == "learn":
                 await self.cmd_learn()
             elif cmd == "kb":
@@ -501,20 +634,43 @@ class XChatSession:
                 elif action == "cloud":
                     self.cloud_ok = not self.cloud_ok
                     print(f"Cloud fallback: {'ON' if self.cloud_ok else 'OFF'}")
-                    if self.cloud_ok and not APIKeyManager.load():
-                        print("  Cloud needs an API key. Enter provider+key, or leave blank to disable.")
-                        provider = input("  Provider (openai/deepseek/gemini): ").strip().lower()
-                        if provider in ("openai", "deepseek", "gemini"):
-                            api_key = input(f"  {provider} API key: ").strip()
-                            if api_key:
-                                APIKeyManager.save(provider, api_key)
-                                print("  Cloud key saved.")
+                    if self.cloud_ok:
+                        cfg = APIKeyManager.load()
+                        if cfg and cfg.get("providers"):
+                            provs = cfg["providers"]
+                            print(f"  Current providers: {', '.join(provs.keys())} (primary: {cfg.get('primary')})")
+                            print("  Enter 'provider:key' to add/overwrite, 'primary <name>' to switch, blank to keep.")
+                            inp = input("  > ").strip()
+                            if not inp:
+                                print("  Cloud config unchanged.")
+                            elif inp.startswith("primary "):
+                                name = inp.split(" ", 1)[1].strip()
+                                if name in provs:
+                                    APIKeyManager.set_primary(name)
+                                    print(f"  Primary switched to {name}.")
+                                else:
+                                    print(f"  Provider '{name}' not configured.")
+                            else:
+                                parts = inp.replace(":", " ").split(maxsplit=1)
+                                if len(parts) == 2 and parts[0] in ("openai", "deepseek", "gemini"):
+                                    APIKeyManager.add_provider(parts[0], parts[1].strip())
+                                    print(f"  Cloud key saved ({parts[0]}).")
+                                else:
+                                    print("  Invalid input. Use 'provider:key' (openai/deepseek/gemini).")
+                        else:
+                            print("  Cloud needs an API key. Enter provider+key, or leave blank to disable.")
+                            provider = input("  Provider (openai/deepseek/gemini): ").strip().lower()
+                            if provider in ("openai", "deepseek", "gemini"):
+                                api_key = input(f"  {provider} API key: ").strip()
+                                if api_key:
+                                    APIKeyManager.add_provider(provider, api_key)
+                                    print("  Cloud key saved.")
+                                else:
+                                    self.cloud_ok = False
+                                    print("  Cloud disabled (no key provided).")
                             else:
                                 self.cloud_ok = False
-                                print("  Cloud disabled (no key provided).")
-                        else:
-                            self.cloud_ok = False
-                            print("  Cloud disabled (invalid provider).")
+                                print("  Cloud disabled (invalid provider).")
 
                 elif action == "exit":
                     self._save_session()
@@ -632,11 +788,11 @@ class XChatSession:
             return None
 
     async def _parse_intent(self, raw: str) -> dict | None:
-        """Parse natural language input into structured command using 3b."""
-        if not self.router.has_model("qwen2.5:3b"):
+        """Parse natural language input into structured command using the local dialog model."""
+        if not self.router.has_model(DIALOG_MODEL):
             return None
         prompt = f"{INTENT_PROMPT}\n\nUser input: {raw}\n\nJSON:"
-        result = await self.router._ollama_chat("qwen2.5:3b", prompt, INTENT_TIMEOUT)
+        result = await self.router._ollama_chat(DIALOG_MODEL, prompt, INTENT_TIMEOUT)
         if not result["ok"] or not result["answer"]:
             return None
         ans = result["answer"].strip()

@@ -10,6 +10,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { PEParser, detectFormat } = require("./pe_parser.js");
 
 // ─── ELF 常量 ───────────────────────────────────────────────────────────────
 const EI_CLASS   = 4;
@@ -509,10 +510,11 @@ class MiniELFParser {
 // ─── 命令行 ─────────────────────────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { so: null, json: false };
+  const opts = { so: null, json: false, maxScanSize: 0 };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--so" && i + 1 < args.length) opts.so = args[++i];
     else if (args[i] === "--json") opts.json = true;
+    else if (args[i] === "--max-scan-size" && i + 1 < args.length) opts.maxScanSize = parseInt(args[++i], 10) || 0;
   }
   return opts;
 }
@@ -525,14 +527,18 @@ function main() {
   }
 
   const buf = fs.readFileSync(opts.so);
-  const parser = new MiniELFParser(buf);
-  const arch = parser.e_machine === EM_AARCH64 ? "arm64" :
+
+  // 按文件格式选择解析器：ELF → MiniELFParser，PE → PEParser
+  const fmt = detectFormat(buf);
+  const parser = fmt === "pe" ? new PEParser(buf) : new MiniELFParser(buf);
+  const arch = fmt === "pe" ? parser.getArch() :
+               parser.e_machine === EM_AARCH64 ? "arm64" :
                parser.e_machine === EM_ARM ? "arm32" :
                parser.e_machine === EM_X86_64 ? "x86_64" : "unknown";
 
   if (!opts.json) {
     console.error(`[cfp_matcher] Target: ${opts.so}`);
-    console.error(`[cfp_matcher] Arch: ${arch}`);
+    console.error(`[cfp_matcher] Arch: ${arch} (format: ${fmt})`);
   }
 
   const sections = parser.getSections();
@@ -544,8 +550,8 @@ function main() {
     return;
   }
 
-  const MAX_TEXT = 30 * 1024 * 1024;
-  const textSize = Math.min(textSec.sh_size, MAX_TEXT);
+  // --max-scan-size 0 = 全量扫描（不截断）
+  const textSize = (opts.maxScanSize > 0) ? Math.min(textSec.sh_size, opts.maxScanSize) : textSec.sh_size;
   const matcher = new PatternMatcher(arch, buf, textSec.sh_offset, textSize);
 
   if (!opts.json) console.error("[cfp_matcher] Decoding instructions...");
